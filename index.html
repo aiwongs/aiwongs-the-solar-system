@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>王氏软件 - 太阳系 3D 模拟</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #000; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
+  #container { width: 100vw; height: 100vh; }
+  #info {
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.5); font-size: 13px; pointer-events: none;
+    letter-spacing: 0.5px; transition: opacity 0.8s;
+    white-space: nowrap;
+  }
+  #tourBtn {
+    position: absolute; top: 16px; right: 16px;
+    background: rgba(255,255,255,0.06); color: rgba(200,200,200,0.7);
+    border: 1px solid rgba(200,200,200,0.12); border-radius: 16px;
+    padding: 5px 14px; font-size: 12px; cursor: pointer;
+    backdrop-filter: blur(6px); transition: opacity 0.4s; outline: none;
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+    opacity: 0;
+  }
+  #tourBtn:hover { opacity: 1; background: rgba(255,255,255,0.12); color: #ddd; border-color: rgba(200,200,200,0.25); }
+  #tourBtn.active {
+    background: rgba(200,200,200,0.12); border-color: rgba(200,200,200,0.3);
+    color: #ccc; animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 6px rgba(200,200,200,0.15); }
+    50% { box-shadow: 0 0 14px rgba(200,200,200,0.3); }
+  }
+  #tourLabel {
+    position: absolute; top: 66%; left: 50%; transform: translate(-50%, -50%);
+    color: rgba(255,255,255,0.85); font-size: 28px; pointer-events: none;
+    text-shadow: 0 0 12px rgba(0,0,0,0.8), 0 0 30px rgba(100,180,255,0.4);
+    transition: opacity 0.8s; opacity: 0; text-align: center;
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; letter-spacing: 2px;
+  }
+  #tourLabel.constView {
+    top: 72%; font-size: 36px;
+  }
+  #tourLabel sub {
+    display: block; font-size: 14px; color: rgba(220,240,255,0.92);
+    letter-spacing: 1px; font-weight: 400; margin-top: 6px; line-height: 1.6;
+    max-width: 600px; margin-left: auto; margin-right: auto;
+  }
+  #tourLabel.planetSub sub { white-space: nowrap; }
+  #fps {
+    position: absolute; top: 24px; left: 24px;
+    color: rgba(255,255,255,0.3); font-size: 11px; pointer-events: none; font-family: monospace;
+    display: none;
+  }
+  #copyright {
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.5); font-size: 13px; pointer-events: none;
+    letter-spacing: 0.5px;
+    opacity: 0; transition: opacity 0.5s;
+    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<audio id="bgm" src="./music/stars.mp3" loop></audio>
+<button id="tourBtn">自动遨游</button>
+<div id="tourLabel"></div>
+<div id="info">🖱 拖拽旋转 &nbsp;|&nbsp; 滚轮缩放 &nbsp;|&nbsp; 右键平移 &nbsp;|&nbsp; 按 T 自动遨游 &nbsp;|&nbsp; 按 R 重置</div>
+<div id="copyright">Copyright &copy; Wongs Software 2006-2026 All Rights Reserved.</div>
+
+<script type="importmap">
+{ "imports": { "three": "./lib/three.module.js", "three/addons/": "./lib/" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const bgm = document.getElementById('bgm');
+
+function createRNG(s) { let v = s | 0; return () => { v = (v * 16807) % 2147483647; return (v - 1) / 2147483646; }; }
+
+function solveKepler(M, e) {
+  let E = M % (2 * Math.PI);
+  for (let i = 0; i < 15; i++) E = M + e * Math.sin(E);
+  return E;
+}
+
+function orbitalPos3D(a, e, incDeg, lop, M) {
+  M = M % (2 * Math.PI);
+  const E = solveKepler(M, e);
+  const x = a * (Math.cos(E) - e);
+  const z = a * Math.sqrt(1 - e * e) * Math.sin(E);
+  const inc = incDeg * Math.PI / 180;
+  const x1 = x;
+  const y1 = z * Math.sin(inc);
+  const z1 = z * Math.cos(inc);
+  return new THREE.Vector3(x1 * Math.cos(lop) - z1 * Math.sin(lop), y1, x1 * Math.sin(lop) + z1 * Math.cos(lop));
+}
+
+function raDecToVec3(raH, decD, r) {
+  const ra = raH * 15 * Math.PI / 180, dec = decD * Math.PI / 180;
+  return new THREE.Vector3(r * Math.cos(dec) * Math.cos(ra), r * Math.sin(dec), -r * Math.cos(dec) * Math.sin(ra));
+}
+
+const container = document.getElementById('container');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1500);
+camera.position.set(0, 25, 45);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.75;
+renderer.shadowMap.enabled = true;
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.minDistance = 4; controls.maxDistance = 850;
+controls.target.set(0, 0, 0); controls.zoomSpeed = 1.2; controls.rotateSpeed = 0.6; controls.update();
+
+scene.add(new THREE.AmbientLight(0x1a1a44, 0.7));
+scene.add(new THREE.PointLight(0xfff5e0, 150, 0, 1.0));
+
+window.addEventListener('error', (ev) => {
+  document.body.innerHTML = `<pre style="color:orange;padding:20px;font-size:14px;white-space:pre-wrap;font-family:monospace">JS Error: ${ev.message}\nFile: ${ev.filename}\nLine: ${ev.lineno}:${ev.colno}</pre>`;
+});
+
+function createStarfield() {
+  const n = 3000, R = 580, pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1), r = R + (Math.random() - 0.3) * 40;
+    pos[i * 3] = r * Math.sin(ph) * Math.cos(th); pos[i * 3 + 1] = r * Math.sin(ph) * Math.sin(th); pos[i * 3 + 2] = r * Math.cos(ph);
+    const t = Math.random();
+    if (t < 0.05) { col[i * 3] = 0.4; col[i * 3 + 1] = 0.5; col[i * 3 + 2] = 1.0; }
+    else if (t < 0.10) { col[i * 3] = 1.0; col[i * 3 + 1] = 0.78; col[i * 3 + 2] = 0.4; }
+    else if (t < 0.14) { col[i * 3] = 1.0; col[i * 3 + 1] = 0.6; col[i * 3 + 2] = 0.3; }
+    else { const b = 0.65 + Math.random() * 0.35; col[i * 3] = b; col[i * 3 + 1] = b; col[i * 3 + 2] = b; }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const m = new THREE.PointsMaterial({
+    size: 0.7, vertexColors: true, blending: THREE.AdditiveBlending,
+    depthWrite: false, transparent: true, opacity: 0.85,
+  });
+  const s = new THREE.Points(g, m); s.name = 'starfield'; scene.add(s);
+  return s;
+}
+
+function createMilkyWay() {
+  const n = 7000, R = 570, til = 60.2 * Math.PI / 180, pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const ln = Math.random() * Math.PI * 2, lt = (Math.random() - 0.5) * 0.28, r = R + (Math.random() - 0.5) * 10;
+    const x0 = r * Math.cos(lt) * Math.cos(ln), y0 = r * Math.cos(lt) * Math.sin(ln), z0 = r * Math.sin(lt);
+    pos[i * 3] = x0; pos[i * 3 + 1] = y0 * Math.cos(til) - z0 * Math.sin(til); pos[i * 3 + 2] = y0 * Math.sin(til) + z0 * Math.cos(til);
+    const eqD = Math.abs(lt) / 0.14, al = Math.max(0, 0.55 - eqD * 0.5) * (0.5 + Math.random() * 0.5);
+    const cl = new THREE.Color(); cl.setHSL(0.12 + Math.random() * 0.08, 0.2, 0.55 + Math.random() * 0.3);
+    col[i * 3] = cl.r * al; col[i * 3 + 1] = cl.g * al; col[i * 3 + 2] = cl.b * al;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 0.4, vertexColors: true, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.5 })));
+}
+
+function createGalaxySprites() {
+  [{ d: [0.55,0.45,0.7], c: '#6677aa', s: 22, o: 0.45 }, { d: [-0.7,-0.25,0.55], c: '#aa8866', s: 16, o: 0.4 }, { d: [0.25,-0.75,-0.45], c: '#7788aa', s: 20, o: 0.4 }, { d: [-0.5,0.55,-0.6], c: '#88aacc', s: 15, o: 0.45 }, { d: [0.8,-0.15,0.5], c: '#9988aa', s: 14, o: 0.35 }, { d: [-0.35,-0.6,0.7], c: '#7799bb', s: 18, o: 0.4 }].forEach(g => {
+    const cv = document.createElement('canvas'); cv.width = 128; cv.height = 128; const cx = cv.getContext('2d');
+    const gr = cx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gr.addColorStop(0, g.c + 'dd'); gr.addColorStop(0.12, g.c + '88'); gr.addColorStop(0.35, g.c + '22'); gr.addColorStop(0.6, g.c + '05'); gr.addColorStop(1, 'transparent');
+    cx.fillStyle = gr; cx.fillRect(0, 0, 128, 128);
+    cx.fillStyle = g.c + 'ff'; cx.beginPath(); cx.ellipse(74, 60, 22, 7, 0.3, 0, Math.PI * 2); cx.fill();
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: g.o }));
+    const ln = Math.sqrt(g.d[0] ** 2 + g.d[1] ** 2 + g.d[2] ** 2);
+    sp.position.set(g.d[0] / ln * 520, g.d[1] / ln * 520, g.d[2] / ln * 520);
+    sp.scale.set(g.s, g.s, 1); scene.add(sp);
+  });
+}
+
+const constStarGroups = [];
+const constLineGroups = [];
+
+function createConstellations() {
+  const R = 560;
+  const data = [
+    { n: '猎户座', s: [[5.92,7.4],[5.42,6.33],[5.23,-8.2],[5.78,-9.67],[5.67,-1.93],[5.60,-1.2],[5.53,-0.28],[5.58,9.93]], l: [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[0,4],[0,7]] },
+    { n: '北斗七星', s: [[11.05,61.75],[11.02,56.38],[11.88,53.68],[12.25,57.02],[12.90,55.95],[13.38,54.92],[13.78,49.30]], l: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6]] },
+    { n: '仙后座', s: [[0.15,59.13],[0.67,56.53],[0.93,60.72],[1.42,60.23],[1.90,63.67]], l: [[0,1],[1,2],[2,3],[3,4]] },
+    { n: '天鹅座', s: [[20.68,45.27],[19.50,27.97],[20.35,40.25],[20.22,33.97],[19.75,51.73]], l: [[0,1],[1,2],[2,3],[2,4]] },
+    { n: '天琴座', s: [[18.62,38.78],[18.73,39.65],[18.75,32.65],[18.80,37.12],[18.91,37.60]], l: [[0,1],[0,3],[1,4],[2,3]] },
+    { n: '狮子座', s: [[10.13,11.97],[11.82,14.57],[10.33,19.83],[11.23,20.52],[9.75,23.77]], l: [[0,1],[1,2],[2,3],[2,4]] },
+    { n: '金牛座', s: [[4.60,16.50],[5.44,28.60],[5.63,21.13],[4.00,12.48],[4.47,19.17]], l: [[0,1],[0,2],[0,3],[3,4]] },
+    { n: '天蝎座', s: [[16.49,-26.43],[15.97,-22.62],[16.08,-19.80],[16.22,-25.59],[17.56,-37.03]], l: [[0,1],[1,2],[0,3],[0,4]] },
+    { n: '大犬座', s: [[6.75,-16.72],[7.07,-26.40],[6.38,-17.95],[7.05,-28.95]], l: [[0,1],[0,2],[1,3]] },
+    { n: '双子座', s: [[7.57,31.88],[7.75,28.02],[6.63,16.40],[7.33,21.97]], l: [[0,1],[0,2],[1,3]] },
+    { n: '室女座', s: [[11.83,1.75],[12.90,-3.45],[13.03,-11.15],[12.68,-6.72]], l: [[0,1],[1,2],[1,3]] },
+    { n: '射手座', s: [[19.05,-29.87],[18.40,-34.38],[18.92,-26.30],[19.37,-21.02],[18.28,-25.42]], l: [[0,1],[0,2],[2,3],[1,4]] },
+    { n: '飞马座', s: [[23.07,15.20],[22.87,9.87],[23.06,28.08],[21.73,9.87]], l: [[0,1],[0,2],[1,3]] },
+    { n: '仙女座', s: [[0.14,29.08],[0.62,42.32],[0.93,38.50],[2.03,42.32]], l: [[0,1],[1,2],[1,3]] },
+    { n: '小熊座', s: [[2.53,89.27],[15.06,77.63],[14.85,74.15],[16.55,82.03]], l: [[0,1],[1,2],[2,3]] },
+    { n: '牧夫座', s: [[14.26,19.18],[14.53,51.68],[13.81,49.32],[14.68,27.07]], l: [[0,1],[0,2],[1,3]] },
+    { n: '天鹰座', s: [[19.85,8.87],[19.42,3.12],[19.08,13.87],[19.76,-0.82]], l: [[0,1],[0,2],[1,3]] },
+    { n: '英仙座', s: [[3.40,49.87],[3.08,40.95],[2.31,57.28],[3.73,42.45]], l: [[0,1],[0,2],[1,3]] },
+    { n: '天龙座', s: [[14.08,64.38],[14.13,55.18],[15.20,58.97],[17.93,51.48],[18.03,64.72]], l: [[0,1],[1,2],[2,3],[3,4]] },
+    { n: '南十字座', s: [[12.44,-63.10],[12.78,-59.55],[12.35,-60.37],[12.52,-57.13]], l: [[0,1],[1,3],[0,2]] },
+  ];
+
+  const starGeo = new THREE.SphereGeometry(5.0, 10, 10);
+  const starColors = [0xaaccff, 0xccddff, 0xddccff, 0xccffff, 0xeeccbb, 0xffffcc, 0xccccff, 0xddddff, 0xbbddff, 0xccccff];
+
+  data.forEach((con, ci) => {
+    const pts3D = con.s.map(s => raDecToVec3(s[0], s[1], R));
+    const starsInGroup = [];
+    const linesInGroup = [];
+
+    const lv = [];
+    con.l.forEach(([a, b]) => { lv.push(pts3D[a].x, pts3D[a].y, pts3D[a].z, pts3D[b].x, pts3D[b].y, pts3D[b].z); });
+    const lg = new THREE.BufferGeometry();
+    lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(lv), 3));
+    const lm = new THREE.LineBasicMaterial({ color: 0xeeffff, transparent: true, opacity: 0.9, depthWrite: false });
+    linesInGroup.push(lm);
+    scene.add(new THREE.LineSegments(lg, lm));
+
+    pts3D.forEach((p, si) => {
+      const sm = new THREE.MeshBasicMaterial({
+        color: starColors[(ci + si) % starColors.length],
+        transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const sphere = new THREE.Mesh(starGeo, sm);
+      sphere.position.copy(p);
+      sphere.userData = { baseScale: 1.0, phase: Math.random() * Math.PI * 2, freq: 2.5 + Math.random() * 3.5 };
+      scene.add(sphere);
+      starsInGroup.push(sphere);
+    });
+
+    constLineGroups.push(linesInGroup);
+    constStarGroups.push(starsInGroup);
+    const center = new THREE.Vector3(); pts3D.forEach(p => center.add(p));
+    center.divideScalar(pts3D.length).normalize().multiplyScalar(R + 10);
+    const lc = document.createElement('canvas'); lc.width = 256; lc.height = 64; const lx = lc.getContext('2d');
+    lx.fillStyle = 'rgba(170,200,230,0.65)'; lx.font = '22px "Microsoft YaHei", sans-serif'; lx.textAlign = 'center'; lx.textBaseline = 'middle';
+    lx.fillText(con.n, 128, 32);
+    const lt = new THREE.CanvasTexture(lc); lt.minFilter = THREE.LinearFilter;
+    const ls = new THREE.Sprite(new THREE.SpriteMaterial({ map: lt, transparent: true, depthWrite: false, opacity: 0.55 }));
+    ls.position.copy(center); ls.scale.set(10, 2.5, 1); scene.add(ls);
+  });
+}
+
+function createSunTexture() {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const cx = cv.getContext('2d'); const rn = createRNG(123);
+  const gr = cx.createRadialGradient(256, 128, 0, 256, 128, 256);
+  gr.addColorStop(0, '#fffff0'); gr.addColorStop(0.08, '#fffde0'); gr.addColorStop(0.2, '#ffe082');
+  gr.addColorStop(0.45, '#ff9800'); gr.addColorStop(0.7, '#ff6d00'); gr.addColorStop(0.9, '#e65100'); gr.addColorStop(1, '#bf360c');
+  cx.fillStyle = gr; cx.fillRect(0, 0, 512, 256);
+  for (let i = 0; i < 40; i++) { cx.fillStyle = `rgba(180,80,15,${rn() * 0.45 + 0.08})`; cx.beginPath(); cx.arc(rn() * 480 + 16, rn() * 230 + 13, rn() * 10 + 2, 0, Math.PI * 2); cx.fill(); }
+  for (let i = 0; i < 80; i++) { cx.fillStyle = `rgba(255,255,220,${rn() * 0.25})`; cx.beginPath(); cx.arc(rn() * 380 + 66, rn() * 190 + 33, rn() * 5 + 1, 0, Math.PI * 2); cx.fill(); }
+  return new THREE.CanvasTexture(cv);
+}
+
+function createSun() {
+  const tx = createSunTexture(); tx.colorSpace = THREE.SRGBColorSpace;
+  const sm = new THREE.Mesh(new THREE.SphereGeometry(5.5, 64, 64), new THREE.MeshBasicMaterial({ map: tx }));
+  scene.add(sm);
+
+  const gc = document.createElement('canvas'); gc.width = 256; gc.height = 256; const gx = gc.getContext('2d');
+  const gg = gx.createRadialGradient(128, 128, 0, 128, 128, 128);
+  gg.addColorStop(0, 'rgba(255,220,100,0.75)'); gg.addColorStop(0.12, 'rgba(255,180,40,0.5)');
+  gg.addColorStop(0.35, 'rgba(255,120,10,0.18)'); gg.addColorStop(0.65, 'rgba(255,60,0,0.04)'); gg.addColorStop(1, 'rgba(255,20,0,0)');
+  gx.fillStyle = gg; gx.fillRect(0, 0, 256, 256);
+  const gs = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(gc), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.9 }));
+  gs.scale.set(32, 32, 1); scene.add(gs);
+
+  [{ r: 5.9, c: 0xffcc44, o: 0.18 }, { r: 6.7, c: 0xff8800, o: 0.08 }, { r: 8.0, c: 0xff4400, o: 0.03 }].forEach(l => {
+    scene.add(new THREE.Mesh(new THREE.SphereGeometry(l.r, 32, 32), new THREE.MeshBasicMaterial({ color: l.c, transparent: true, opacity: l.o, blending: THREE.AdditiveBlending, depthWrite: false })));
+  });
+  return sm;
+}
+
+const orbitTubes = [];
+
+function createOrbitTube(a, e, incDeg, lop) {
+  try {
+    const pts = [];
+    for (let i = 0; i <= 200; i++) pts.push(orbitalPos3D(a, e, incDeg, lop, (i / 200) * Math.PI * 2));
+    const curve = new THREE.CatmullRomCurve3(pts, true);
+    const geo = new THREE.TubeGeometry(curve, 200, 0.012, 8, true);
+    scene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xddeeff, transparent: true, opacity: 1.0, depthWrite: false })));
+    orbitTubes.push(scene.children[scene.children.length - 1]);
+  } catch(e) {
+    const pts = [];
+    for (let i = 0; i <= 256; i++) pts.push(orbitalPos3D(a, e, incDeg, lop, (i / 256) * Math.PI * 2));
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0xddeeff, transparent: true, opacity: 1.0, depthWrite: false }));
+    scene.add(line);
+    orbitTubes.push(line);
+  }
+}
+
+function createPlanetTexture(baseColor, seed) {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 128; const cx = cv.getContext('2d'); const rn = createRNG(seed || 1);
+  cx.fillStyle = baseColor; cx.fillRect(0, 0, 256, 128);
+  const g = cx.createLinearGradient(0, 0, 0, 128); g.addColorStop(0, 'rgba(0,0,0,0.1)'); g.addColorStop(0.5, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.1)');
+  cx.fillStyle = g; cx.fillRect(0, 0, 256, 128);
+  for (let i = 0; i < 80; i++) { const v = Math.floor(180 + (rn() * 0.3 - 0.15) * 255); cx.fillStyle = `rgba(${v},${v},${v},${Math.abs(rn() * 0.3 - 0.15) * 2})`; cx.beginPath(); cx.arc(rn() * 252, rn() * 124, rn() * 8 + 1, 0, Math.PI * 2); cx.fill(); }
+  return new THREE.CanvasTexture(cv);
+}
+
+function createMercuryTexture() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const ctx = c.getContext('2d'); const rn = createRNG(17);
+  ctx.fillStyle = '#555555'; ctx.fillRect(0, 0, 256, 128);
+  for (let i = 0; i < 300; i++) {
+    ctx.fillStyle = `rgba(${40+rn()*50},${40+rn()*50},${42+rn()*50},${rn()*0.5+0.2})`;
+    ctx.beginPath(); ctx.arc(rn()*252, rn()*124, rn()*6+1, 0, Math.PI*2); ctx.fill();
+  }
+  for (let i = 0; i < 60; i++) {
+    ctx.fillStyle = `rgba(180,180,180,${rn()*0.25})`;
+    ctx.beginPath(); ctx.arc(rn()*252, rn()*124, rn()*3+0.5, 0, Math.PI*2); ctx.fill();
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+function createVenusTexture() {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+  const ctx = c.getContext('2d'); const rn = createRNG(33);
+  ctx.fillStyle = '#c8b080'; ctx.fillRect(0, 0, 512, 256);
+  for (let i = 0; i < 60; i++) {
+    ctx.fillStyle = `rgba(220,200,160,${rn()*0.3+0.1})`;
+    ctx.beginPath(); ctx.ellipse(rn()*512, rn()*256, rn()*80+30, rn()*15+3, rn()*Math.PI, 0, Math.PI*2); ctx.fill();
+  }
+  for (let i = 0; i < 40; i++) {
+    ctx.fillStyle = `rgba(180,150,100,${rn()*0.2+0.05})`;
+    ctx.beginPath(); ctx.ellipse(rn()*512, rn()*256, rn()*60+20, rn()*10+2, rn()*Math.PI, 0, Math.PI*2); ctx.fill();
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+function createUranusTexture() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const ctx = c.getContext('2d'); const rn = createRNG(71);
+  ctx.fillStyle = '#6699bb'; ctx.fillRect(0, 0, 256, 128);
+  for (let i = 0; i < 20; i++) {
+    ctx.fillStyle = `rgba(140,200,230,${rn()*0.2+0.06})`;
+    ctx.fillRect(0, i*7+rn()*3, 256, rn()*5+2);
+  }
+  for (let i = 0; i < 10; i++) {
+    ctx.fillStyle = `rgba(80,130,180,${rn()*0.12})`;
+    ctx.fillRect(0, i*13+rn()*4, 256, rn()*3+1);
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+function createNeptuneTexture() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const ctx = c.getContext('2d'); const rn = createRNG(83);
+  ctx.fillStyle = '#2244aa'; ctx.fillRect(0, 0, 256, 128);
+  for (let i = 0; i < 16; i++) {
+    ctx.fillStyle = `rgba(80,140,210,${rn()*0.22+0.06})`;
+    ctx.fillRect(0, i*8+rn()*4, 256, rn()*5+2);
+  }
+  for (let i = 0; i < 15; i++) {
+    ctx.fillStyle = `rgba(180,210,255,${rn()*0.1})`;
+    ctx.beginPath(); ctx.ellipse(rn()*256, rn()*128, rn()*35+12, rn()*5+1, rn()*Math.PI, 0, Math.PI*2); ctx.fill();
+  }
+  return new THREE.CanvasTexture(c);
+}
+
+function createEarthTexture() {
+  const W = 1024, H = 512;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const rn = createRNG(42);
+
+  const oceanGrad = ctx.createLinearGradient(0, 0, 0, H);
+  oceanGrad.addColorStop(0, '#1a3d5c'); oceanGrad.addColorStop(0.12, '#1a5fa0');
+  oceanGrad.addColorStop(0.3, '#1e6daa'); oceanGrad.addColorStop(0.5, '#2278b8');
+  oceanGrad.addColorStop(0.7, '#1e6daa'); oceanGrad.addColorStop(0.88, '#1a5fa0');
+  oceanGrad.addColorStop(1, '#1a3d5c');
+  ctx.fillStyle = oceanGrad; ctx.fillRect(0, 0, W, H);
+
+  function bl(bx, by, rx, ry, cl) {
+    ctx.fillStyle = cl; ctx.beginPath();
+    for (let i = 0; i < 20; i++) { const a = (i / 20) * Math.PI * 2; const x = bx + Math.cos(a) * rx * (0.55 + rn() * 0.45); const y = by + Math.sin(a) * ry * (0.55 + rn() * 0.45); i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+    ctx.closePath(); ctx.fill();
+    for (let j = 0; j < 6; j++) { ctx.globalAlpha = rn() * 0.35 + 0.25; ctx.beginPath(); ctx.arc(bx + (rn() - 0.5) * rx * 1.2, by + (rn() - 0.5) * ry * 1.2, rn() * rx * 0.22 + 2, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  }
+
+  bl(170, 115, 180, 120, '#3d8b37');
+  bl(220, 300, 95, 170, '#2d7b27');
+  bl(220, 320, 85, 155, '#358535');
+  bl(510, 105, 160, 95, '#4d9b47');
+  bl(520, 270, 105, 195, '#9a8a30');
+  bl(510, 250, 90, 170, '#8a7a28');
+  bl(710, 95, 250, 140, '#5a8b3a');
+  bl(740, 130, 220, 115, '#4d8b35');
+  bl(820, 350, 65, 50, '#c49440');
+  bl(320, 375, 90, 35, '#3d7b37');
+  bl(170, 470, 240, 45, '#4d9b37');
+  bl(100, 480, 320, 38, '#3a8530');
+  bl(620, 160, 35, 30, '#3d8b37');
+  bl(50, 200, 50, 45, '#4d9b47');
+  bl(940, 240, 35, 28, '#3d8b37');
+  bl(440, 470, 45, 30, '#4d9b47');
+  bl(740, 460, 50, 35, '#358535');
+  bl(500, 455, 40, 28, '#3d8b37');
+
+  ctx.fillStyle = '#e8f0f8'; ctx.fillRect(0, H - 52, W, 52);
+  const iceGrad = ctx.createLinearGradient(0, 40, 0, 100);
+  iceGrad.addColorStop(0, 'rgba(240,245,255,0.9)');
+  iceGrad.addColorStop(1, 'rgba(240,245,255,0)');
+  ctx.fillStyle = iceGrad; ctx.fillRect(0, 40, W, 60);
+
+  ctx.globalAlpha = 0.12;
+  for (let i = 0; i < 250; i++) {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    const cy = rn() * 360 + 65;
+    ctx.ellipse(rn() * W, cy, rn() * 40 + 12, (rn() * 40 + 12) * (0.2 + rn() * 0.3), rn() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  return new THREE.CanvasTexture(cv);
+}
+
+function createMoonTexture() {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const cx = cv.getContext('2d'); const rn = createRNG(99);
+  cx.fillStyle = '#888888'; cx.fillRect(0, 0, 512, 256);
+  for (let i = 0; i < 14; i++) { const mx = rn() * 460 + 26, my = rn() * 210 + 23, mr = rn() * 60 + 20; const g = cx.createRadialGradient(mx, my, 0, mx, my, mr); g.addColorStop(0, 'rgba(50,50,52,0.6)'); g.addColorStop(0.5, 'rgba(80,80,82,0.3)'); g.addColorStop(1, 'rgba(130,130,132,0)'); cx.fillStyle = g; cx.beginPath(); cx.arc(mx, my, mr, 0, Math.PI * 2); cx.fill(); }
+  for (let i = 0; i < 500; i++) { const dk=rn()*60+50; const s=rn()*6+1; cx.fillStyle = `rgba(${dk},${dk},${dk+2},${rn()*0.6+0.3})`; cx.beginPath(); cx.arc(rn()*508+4, rn()*252+4, s, 0, Math.PI*2); cx.fill(); }
+  for (let i = 0; i < 150; i++) { cx.fillStyle = `rgba(220,220,220,${rn()*0.45})`; cx.beginPath(); cx.arc(rn()*508+4, rn()*252+4, rn()*3+1, 0, Math.PI*2); cx.fill(); }
+  return new THREE.CanvasTexture(cv);
+}
+
+function createJupiterTexture() {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const cx = cv.getContext('2d'); const rn = createRNG(77);
+  cx.fillStyle = '#c4a882'; cx.fillRect(0, 0, 512, 256);
+  const bc = ['#d4b892','#c4986a','#d4a878','#b88858','#dabc90','#c8a070','#dec098','#ba8858','#d4b080','#c49868'];
+  for (let i = 0; i < 26; i++) { cx.fillStyle = bc[i % 10]; cx.globalAlpha = rn() * 0.35 + 0.25; cx.fillRect(0, i * 10 + rn() * 4 - 2, 512, rn() * 9 + 2); }
+  cx.globalAlpha = 1;
+  for (let i = 0; i < 50; i++) { cx.fillStyle = rn() < 0.5 ? `rgba(255,220,180,${rn() * 0.3})` : `rgba(140,90,50,${rn() * 0.25})`; cx.beginPath(); cx.ellipse(rn() * 500, rn() * 250, rn() * 14 + 3, (rn() * 14 + 3) * (0.2 + rn() * 0.5), rn() * Math.PI, 0, Math.PI * 2); cx.fill(); }
+  const rr = cx.createRadialGradient(200, 150, 0, 200, 150, 28); rr.addColorStop(0, '#d47850'); rr.addColorStop(0.5, '#c06038'); rr.addColorStop(1, 'rgba(180,120,80,0)'); cx.fillStyle = rr; cx.beginPath(); cx.ellipse(200, 150, 28, 14, 0.08, 0, Math.PI * 2); cx.fill();
+  cx.fillStyle = '#e09060'; cx.beginPath(); cx.ellipse(200, 150, 16, 7, 0.08, 0, Math.PI * 2); cx.fill();
+  return new THREE.CanvasTexture(cv);
+}
+
+function createSaturnTexture() {
+  const cv = document.createElement('canvas'); cv.width = 512; cv.height = 256; const cx = cv.getContext('2d'); const rn = createRNG(55);
+  cx.fillStyle = '#dcc898'; cx.fillRect(0, 0, 512, 256);
+  const bc = ['#e0cc90','#d4b870','#dcc880','#d0b468','#e4d090','#d8bc78'];
+  for (let i = 0; i < 14; i++) { cx.fillStyle = bc[i % 6]; cx.globalAlpha = rn() * 0.35 + 0.25; cx.fillRect(0, i * 18.5 + rn() * 5, 512, rn() * 10 + 4); }
+  cx.globalAlpha = 1;
+  return new THREE.CanvasTexture(cv);
+}
+
+function createPlanet(data) {
+  const group = new THREE.Object3D(); group.name = `${data.name}_group`; scene.add(group);
+
+  const pGeo = new THREE.SphereGeometry(data.sizeVisual, 48, 48);
+  let tex;
+  if (data.textureUrl) {
+    tex = new THREE.TextureLoader().load(data.textureUrl);
+  } else if (data.textureFactory) {
+    tex = data.textureFactory();
+  } else {
+    tex = createPlanetTexture(data.color, data.seed);
+  }
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const pMat = new THREE.MeshStandardMaterial({ map: tex, color: data.tint || 0xffffff, roughness: data.roughness ?? 0.75, metalness: data.metalness ?? 0.05, emissive: data.emissive || 0x000000, emissiveIntensity: data.emissiveIntensity ?? 0 });
+  const mesh = new THREE.Mesh(pGeo, pMat); mesh.name = data.name;
+  if (data.name === 'Uranus') {
+    const tg = new THREE.Object3D(); tg.rotation.x = 97.8 * Math.PI / 180;
+    tg.add(mesh); group.add(tg); data._tiltGroup = tg;
+  } else if (data.name === 'Saturn') {
+    const tg = new THREE.Object3D(); tg.rotation.z = (data.ringTilt || 27) * Math.PI / 180;
+    tg.add(mesh); group.add(tg); data._tiltGroup = tg;
+  } else if (data.axialTilt && Math.abs(data.axialTilt) > 2) {
+    const tg = new THREE.Object3D(); tg.rotation.z = data.axialTilt * Math.PI / 180;
+    tg.add(mesh); group.add(tg); data._tiltGroup = tg;
+  } else {
+    if (data.axialTilt) mesh.rotation.z = data.axialTilt * Math.PI / 180;
+    group.add(mesh);
+  }
+
+  if (data.atmosphere) {
+    group.add(new THREE.Mesh(new THREE.SphereGeometry(data.sizeVisual * 1.06, 48, 48),
+      new THREE.MeshBasicMaterial({ color: data.atmosphereColor || 0x4488ff, transparent: true, opacity: 0.1, blending: THREE.AdditiveBlending, depthWrite: false })));
+  }
+
+  if (data.moons && data.moons.length > 0) {
+    const moonContainer = new THREE.Object3D();
+    const moonTilt = data.moonTilt !== undefined ? data.moonTilt : (data.axialTilt || 0);
+    if (moonTilt) {
+      if (data.name === 'Uranus') {
+        moonContainer.rotation.x = moonTilt * Math.PI / 180;
+      } else {
+        moonContainer.rotation.z = moonTilt * Math.PI / 180;
+      }
+    }
+    group.add(moonContainer);
+    data._moonPivots = [];
+    data.moons.forEach(md => {
+      const mp = new THREE.Object3D(); moonContainer.add(mp);
+      const mGeo = new THREE.SphereGeometry(md.size, 16, 16);
+      const mMat = new THREE.MeshStandardMaterial({ color: md.color || 0xcccccc, roughness: 0.9, metalness: 0.03 });
+      const mMesh = new THREE.Mesh(mGeo, mMat);
+      mMesh.position.x = md.distance;
+      mp.add(mMesh);
+      mp.userData = { speed: md.speed, distance: md.distance, ecc: md.ecc || 0, tidalLock: md.tidalLock || false };
+      data._moonPivots.push(mp);
+
+      const pts = [];
+      for (let i = 0; i <= 64; i++) {
+        const M = (i / 64) * Math.PI * 2;
+        const pos = orbitalPos3D(md.distance, md.ecc || 0, 0, 0, M);
+        pts.push(pos);
+      }
+      const orbitGeo = new THREE.BufferGeometry().setFromPoints(pts);
+      const orbitLine = new THREE.Line(orbitGeo, new THREE.LineBasicMaterial({ color: 0x8899aa, transparent: true, opacity: 0.45, depthWrite: false }));
+      moonContainer.add(orbitLine);
+
+      const lc = document.createElement('canvas'); lc.width = 160; lc.height = 40;
+      const lx = lc.getContext('2d');
+      const parts = md.name.split(' ');
+      lx.fillStyle = 'rgba(230,240,255,0.95)'; lx.font = '12px "Microsoft YaHei", sans-serif'; lx.textAlign = 'center';
+      lx.fillText(parts[0], 80, 16);
+      lx.fillStyle = 'rgba(200,220,240,0.85)'; lx.font = '9px "Segoe UI", sans-serif';
+      lx.fillText(parts.slice(1).join(' ') || '', 80, 32);
+      const lt = new THREE.CanvasTexture(lc); lt.minFilter = THREE.LinearFilter;
+      const ls = new THREE.Sprite(new THREE.SpriteMaterial({ map: lt, transparent: true, depthWrite: false, opacity: 0.85 }));
+      ls.position.set(md.distance, md.size + 0.5, 0);
+      ls.scale.set(2.5, 0.7, 1);
+      ls.visible = false;
+      mp.add(ls);
+      moonLabels.push(ls);
+    });
+  } else if (data.moon) {
+    const mp = new THREE.Object3D(); group.add(mp);
+    const mTex = data.moon.textureFactory ? data.moon.textureFactory() : createPlanetTexture('#c8c8c8', 200);
+    mTex.colorSpace = THREE.SRGBColorSpace;
+    const mMesh = new THREE.Mesh(new THREE.SphereGeometry(data.moon.size, 32, 32), new THREE.MeshStandardMaterial({ map: mTex, roughness: 0.9, metalness: 0.03 }));
+    mMesh.position.x = data.moon.distance; mp.add(mMesh);
+    mp.userData = { speed: data.moon.speed, tidalLock: true };
+    data._moonPivots = [mp];
+
+    const pts = [];
+    for (let i = 0; i <= 64; i++) { const a = (i/64)*Math.PI*2; pts.push(new THREE.Vector3(Math.cos(a)*data.moon.distance, 0, Math.sin(a)*data.moon.distance)); }
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x8899aa, transparent: true, opacity: 0.45, depthWrite: false })));
+
+    const mlc = document.createElement('canvas'); mlc.width = 160; mlc.height = 40;
+    const mlx = mlc.getContext('2d');
+    mlx.fillStyle = 'rgba(230,240,255,0.95)'; mlx.font = '12px "Microsoft YaHei", sans-serif'; mlx.textAlign = 'center';
+    mlx.fillText('月球', 80, 16);
+    mlx.fillStyle = 'rgba(200,220,240,0.85)'; mlx.font = '9px "Segoe UI", sans-serif';
+    mlx.fillText('The Moon', 80, 32);
+    const mlt = new THREE.CanvasTexture(mlc); mlt.minFilter = THREE.LinearFilter;
+    const mls = new THREE.Sprite(new THREE.SpriteMaterial({ map: mlt, transparent: true, depthWrite: false, opacity: 0.85 }));
+    mls.position.set(data.moon.distance, data.moon.size + 0.5, 0);
+    mls.scale.set(2.5, 0.7, 1);
+    mls.visible = false;
+    mp.add(mls);
+    moonLabels.push(mls);
+  }
+
+  if (data.rings) {
+    const tiltRad = (data.ringTilt || 27) * Math.PI / 180;
+    const sv = data.sizeVisual;
+
+    const rings = [
+      { inner: 1.05, outer: 1.18, color: 0x998877, opacity: 0.1 },
+      { inner: 1.20, outer: 1.38, color: 0xaa9977, opacity: 0.25 },
+      { inner: 1.40, outer: 1.65, color: 0xccbb88, opacity: 0.45 },
+      { inner: 1.68, outer: 1.78, color: 0x887766, opacity: 0.08 },
+      { inner: 1.80, outer: 2.10, color: 0xccbb88, opacity: 0.48 },
+      { inner: 2.15, outer: 2.28, color: 0xaa9977, opacity: 0.15 },
+    ];
+
+    rings.forEach(r => {
+      const geo = new THREE.RingGeometry(sv * r.inner, sv * r.outer, 256);
+      geo.rotateX(-Math.PI / 2);
+      const ring = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: r.color, side: THREE.DoubleSide, transparent: true,
+        opacity: r.opacity, depthWrite: false,
+      }));
+      ring.rotation.z = tiltRad;
+      group.add(ring);
+    });
+  }
+
+  data._planetGroup = group; data._planetMesh = mesh;
+  data._rotPeriod = data.rotPeriod;
+  data._viewDist = data.viewDist;
+  return data;
+}
+
+function createAsteroidBelt() {
+  const n = 2500;
+  const dummy = new THREE.Object3D();
+  const protoGeo = new THREE.SphereGeometry(0.06, 12, 8);
+  const protoMat = new THREE.MeshBasicMaterial({ color: 0x777777, depthWrite: false });
+  const im = new THREE.InstancedMesh(protoGeo, protoMat, n);
+  const m4 = new THREE.Matrix4();
+
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = SCALE * (2.1 + Math.random() * 1.2);
+    const y = (Math.random() - 0.5) * 1.2;
+    dummy.position.set(Math.cos(a) * r, y, Math.sin(a) * r);
+    dummy.scale.setScalar(0.5 + Math.random() * 1.0);
+    dummy.updateMatrix();
+    im.setMatrixAt(i, dummy.matrix);
+  }
+  im.instanceMatrix.needsUpdate = true;
+  return im;
+}
+
+const SCALE = 24;
+
+const planetDefs = [
+  { name: 'Mercury',  orbitA: 0.387, orbitE: 0.2056, orbitInc: 7.00, periodYR: 0.241, sizeVisual: 0.48, textureFactory: createMercuryTexture, tint: 0x888888, roughness: 1.0, metalness: 0.05, axialTilt: 0.03, rotPeriod: 58.6, moons: [] },
+  { name: 'Venus',    orbitA: 0.723, orbitE: 0.0068, orbitInc: 3.39, periodYR: 0.615, sizeVisual: 0.88, textureFactory: createVenusTexture, tint: 0x888888, roughness: 1.0, metalness: 0.01, axialTilt: 177.4, rotPeriod: 243, moons: [] },  { name: 'Earth',    orbitA: 1.000, orbitE: 0.0167, orbitInc: 0.00, periodYR: 1.000, sizeVisual: 0.90, textureFactory: createEarthTexture, roughness: 0.7, metalness: 0.02, axialTilt: 23.5, rotPeriod: 1.0, atmosphere: true, atmosphereColor: 0x4488ff, viewDist: 1.2, moonTilt: 5.1, moons: [
+    { name: '月球 The Moon', size: 0.25, distance: 2.5, speed: 10.0, color: '#c8c8c8', ecc: 0.055, tidalLock: true },
+  ]},
+  { name: 'Mars',     orbitA: 1.524, orbitE: 0.0934, orbitInc: 1.85, periodYR: 1.881, sizeVisual: 0.56, color: '#c1440e', roughness: 0.85, axialTilt: 25.2, rotPeriod: 1.03, viewDist: 1.4, moons: [
+    { name: '火卫一 Phobos', size: 0.06, distance: 1.0, speed: 24.0, color: '#887766', ecc: 0.015, tidalLock: true },
+    { name: '火卫二 Deimos', size: 0.05, distance: 1.5, speed: 16.0, color: '#776655', ecc: 0.0002, tidalLock: true },
+  ]},
+  { name: 'Jupiter',  orbitA: 5.203, orbitE: 0.0484, orbitInc: 1.31, periodYR: 11.86, sizeVisual: 3.20, textureFactory: createJupiterTexture, roughness: 0.55, axialTilt: 3.1, rotPeriod: 0.414, moons: [
+    { name: '木卫一 Io', size: 0.22, distance: 5.0, speed: 12.0, color: '#ddcc66', ecc: 0.004, tidalLock: true },
+    { name: '木卫二 Europa', size: 0.20, distance: 6.5, speed: 9.0, color: '#ccddee', ecc: 0.009, tidalLock: true },
+    { name: '木卫三 Ganymede', size: 0.28, distance: 8.0, speed: 7.0, color: '#bbaacc', ecc: 0.001, tidalLock: true },
+    { name: '木卫四 Callisto', size: 0.25, distance: 10.0, speed: 5.5, color: '#887788', ecc: 0.007, tidalLock: true },
+  ]},
+  { name: 'Saturn',   orbitA: 9.537, orbitE: 0.0539, orbitInc: 2.49, periodYR: 29.46, sizeVisual: 2.80, textureFactory: createSaturnTexture, roughness: 0.5, axialTilt: 26.7, rotPeriod: 0.444, rings: true, ringTilt: 27, moons: [
+    { name: '土卫六 Titan', size: 0.22, distance: 5.5, speed: 6.0, color: '#ddaa66', ecc: 0.029, tidalLock: true },
+    { name: '土卫二 Enceladus', size: 0.08, distance: 3.5, speed: 8.0, color: '#eeeeff', ecc: 0.005, tidalLock: true },
+    { name: '土卫一 Mimas', size: 0.06, distance: 2.8, speed: 10.0, color: '#ccbbaa', ecc: 0.020, tidalLock: true },
+    { name: '土卫五 Rhea', size: 0.12, distance: 7.0, speed: 4.5, color: '#bbaa99', ecc: 0.001, tidalLock: true },
+  ]},
+  { name: 'Uranus',   orbitA: 19.19, orbitE: 0.0473, orbitInc: 0.77, periodYR: 84.01, sizeVisual: 1.80, textureFactory: createUranusTexture, roughness: 0.35, axialTilt: 97.8, rotPeriod: 0.718, emissive: 0x224466, emissiveIntensity: 0.7, moons: [
+    { name: '天卫三 Titania', size: 0.14, distance: 3.0, speed: 5.0, color: '#99aabb', ecc: 0.001, tidalLock: true },
+    { name: '天卫四 Oberon', size: 0.13, distance: 4.0, speed: 4.0, color: '#8899aa', ecc: 0.001, tidalLock: true },
+    { name: '天卫一 Ariel', size: 0.10, distance: 2.2, speed: 6.5, color: '#aabbcc', ecc: 0.001, tidalLock: true },
+    { name: '天卫二 Umbriel', size: 0.10, distance: 2.8, speed: 5.5, color: '#778888', ecc: 0.004, tidalLock: true },
+  ]},
+  { name: 'Neptune',  orbitA: 30.07, orbitE: 0.0086, orbitInc: 1.77, periodYR: 164.8, sizeVisual: 1.75, textureFactory: createNeptuneTexture, roughness: 0.35, axialTilt: 28.3, rotPeriod: 0.671, emissive: 0x224466, emissiveIntensity: 1.5, moons: [
+    { name: '海卫一 Triton', size: 0.18, distance: 3.5, speed: 4.0, color: '#bbccdd', ecc: 0.000016, tidalLock: true },
+  ]},
+];
+
+const moonLabels = [];
+
+const planets = planetDefs.map((d, i) => {
+  const a = d.orbitA * SCALE, lop = (i * 47 + d.orbitA * 30) * Math.PI / 180;
+  const precession = (0.02 + d.orbitE * 0.15) / (d.periodYR * 5);
+  createOrbitTube(a, d.orbitE, d.orbitInc, lop);
+  return createPlanet({ ...d, _orbit: { a, e: d.orbitE, inc: d.orbitInc, lop, period: d.periodYR * 12, precession, M0: Math.random() * Math.PI * 2 } });
+});
+
+const starfield = createStarfield();
+createMilkyWay();
+createGalaxySprites();
+createConstellations();
+const sunMesh = createSun();
+scene.add(createAsteroidBelt());
+
+const solarObjects = [];
+scene.traverse(o => {
+  if (o === sunMesh || (o.isMesh && o.material && o.material.isMeshStandardMaterial && o.name && planets.some(p => p.name === o.name))) {
+    solarObjects.push(o);
+  }
+});
+planets.forEach(p => {
+  p._planetGroup.traverse(o => { if (!solarObjects.includes(o)) solarObjects.push(o); });
+});
+const sunGlows = [];
+scene.children.forEach(c => { if (c.isSprite && c.material.blending === THREE.AdditiveBlending && c.scale.x > 20) sunGlows.push(c); });
+scene.children.forEach(c => { if (c.isMesh && c.material.isMeshBasicMaterial && c.material.blending === THREE.AdditiveBlending) sunGlows.push(c); });
+
+function setSolarVisibility(visible) {
+  sunMesh.visible = visible;
+  sunGlows.forEach(g => { g.visible = visible; });
+  planets.forEach(p => { p._planetGroup.visible = visible; });
+  orbitTubes.forEach(t => { t.visible = visible; });
+  const sf = scene.getObjectByName('starfield');
+  if (sf) { sf.material.opacity = visible ? 0.85 : 0.01; }
+  const ab = scene.children.find(c => c.isInstancedMesh);
+  if (ab) ab.visible = visible;
+}
+
+function setMoonLabelsVisible(visible) {
+  moonLabels.forEach(l => { l.visible = visible; });
+}
+
+const tourBtn = document.getElementById('tourBtn'), infoEl = document.getElementById('info'), tourLabel = document.getElementById('tourLabel'), copyrightEl = document.getElementById('copyright');
+
+const planetNames = {
+  'Mercury':   '水星 Mercury<sub>直径 4,879 km | 公转 88 天 | 自转 59 天<br>无卫星</sub>',
+  'Venus':     '金星 Venus<sub>直径 12,104 km | 公转 225 天 | 自转 243 天<br>无卫星</sub>',
+  'Earth':     '地球 Earth<sub>直径 12,742 km | 公转 365 天 | 自转 24 小时<br>卫星: 月球 The Moon</sub>',
+  'Mars':      '火星 Mars<sub>直径 6,779 km | 公转 687 天 | 自转 24.6 小时<br>卫星: 火卫一 Phobos · 火卫二 Deimos</sub>',
+  'Jupiter':   '木星 Jupiter<sub>直径 139,820 km | 公转 12 年 | 自转 10 小时<br>卫星: 木卫一 Io · 木卫二 Europa · 木卫三 Ganymede · 木卫四 Callisto</sub>',
+  'Saturn':    '土星 Saturn<sub>直径 116,460 km | 公转 29 年 | 自转 10.7 小时<br>卫星: 土卫六 Titan · 土卫二 Enceladus · 土卫一 Mimas · 土卫五 Rhea</sub>',
+  'Uranus':    '天王星 Uranus<sub>直径 50,724 km | 公转 84 年 | 自转 17 小时<br>卫星: 天卫三 Titania · 天卫四 Oberon · 天卫一 Ariel · 天卫二 Umbriel</sub>',
+  'Neptune':   '海王星 Neptune<sub>直径 49,244 km | 公转 165 年 | 自转 16 小时<br>卫星: 海卫一 Triton</sub>',
+};
+
+const constellationInfo = [
+  { n: '猎户座 Orion', ra: 5.6, dec: 0, desc: '冬季最亮星座，猎人之形' },
+  { n: '北斗七星 The Big Dipper', ra: 12.5, dec: 57, desc: '大熊座尾部，指北之星' },
+  { n: '仙后座 Cassiopeia', ra: 1.0, dec: 60, desc: 'W形星座，拱极永不落下' },
+  { n: '天鹅座 Cygnus', ra: 20.1, dec: 40, desc: '北十字，银河中游弋' },
+  { n: '天琴座 Lyra', ra: 18.7, dec: 37, desc: '织女星所在，小巧明亮' },
+  { n: '狮子座 Leo', ra: 10.5, dec: 17, desc: '春夜星空百兽之王' },
+  { n: '金牛座 Taurus', ra: 4.8, dec: 19, desc: '黄道星座，毕宿五闪耀' },
+  { n: '天蝎座 Scorpius', ra: 16.5, dec: -26, desc: '夏夜银河中最耀眼' },
+  { n: '大犬座 Canis Major', ra: 6.8, dec: -22, desc: '天狼星所在，全天最亮恒星' },
+  { n: '双子座 Gemini', ra: 7.2, dec: 25, desc: '冬季黄道双生子' },
+  { n: '室女座 Virgo', ra: 12.7, dec: -5, desc: '春季最大星座' },
+  { n: '射手座 Sagittarius', ra: 18.7, dec: -28, desc: '银河系中心方向所在' },
+  { n: '飞马座 Pegasus', ra: 22.7, dec: 16, desc: '秋季夜空大四边形' },
+  { n: '仙女座 Andromeda', ra: 0.9, dec: 40, desc: '仙女星系所在，秋夜明珠' },
+  { n: '小熊座 Ursa Minor', ra: 10, dec: 80, desc: '北极星所在，指引正北' },
+  { n: '牧夫座 Boötes', ra: 14, dec: 37, desc: '春夜追熊的牧人' },
+  { n: '天鹰座 Aquila', ra: 19.5, dec: 5, desc: '牛郎星所在，银河之畔' },
+  { n: '英仙座 Perseus', ra: 3.1, dec: 48, desc: '秋季英雄，斩妖除魔' },
+  { n: '天龙座 Draco', ra: 16, dec: 60, desc: '环绕小熊的蜿蜒巨龙' },
+  { n: '南十字座 Crux', ra: 12.5, dec: -60, desc: '南半球指路明灯' },
+];
+
+const contactMarkers = [
+  { n: '昴宿星团 The Pleiades', ra: 3.78, dec: 24.1, desc: '比利·迈尔 Billy Meier | 1975年起接触', detail: '瑞士人比利·迈尔自称自1975年起与昴宿星人接触，传递了关于人类精神觉醒、环境保护、宇宙和平的大量信息与照片证据。' },
+  { n: '网罟座ζ Zeta Reticuli', ra: 3.30, dec: -62.5, desc: '罗斯威尔事件 / 外星人访谈 | 1947年', detail: '1947年罗斯威尔坠毁事件。据称生还的外星人来自网罟座ζ(泽塔双星)，访谈中传递了关于意识永恒、轮回、人类被"囚禁"于地球的信息，并警告人类正走向自我毁灭，提及"旧帝国"对地球的长期控制与灵魂收割。' },
+  { n: '天狼星 Sirius', ra: 6.75, dec: -16.7, desc: '非洲多贡族 Dogon | 古老传承', detail: '西非马里的多贡族数千年前即知晓天狼星存在不可见的伴星(天狼星B)，每50年绕行一周，与近代天文学发现惊人吻合。' },
+  { n: '大角星 Arcturus', ra: 14.26, dec: 19.2, desc: '牧夫座α | 多起灵性接触', detail: '大角星在多起通灵与灵性接触中被提及为高度进化的文明，传递关于光之工作、地球扬升、集体意识进化的教导。' },
+  { n: '织女星 Vega', ra: 18.62, dec: 38.8, desc: '天琴座α | 多文明接触传说', detail: '织女星在多个接触案例中被提及，据传天琴座是人类祖先文明起源地之一，经历了星际战争与迁徙。' },
+  { n: '参宿四 Betelgeuse', ra: 5.92, dec: 7.4, desc: '猎户座α | 多起接触报告', detail: '参宿四周边星系在多起UFO接触报告中被提及为外星文明据点，包括声称的"猎户座议会"等星际政治实体。' },
+  { n: '果克星 (定位不明)', ra: 14.65, dec: -60.8, desc: '张祥前 | 1985年接触 · 推测星位①', detail: '张祥前从未给出具体坐标。据其"距离约十几光年"自述，推测可能在半人马座α(4.37光年)附近。此为推测星位①。' },
+  { n: '果克星 (定位不明)', ra: 3.53, dec: -9.45, desc: '张祥前 | 1985年接触 · 推测星位②', detail: '推测候选：波江座ε(天苑四，10.5光年)。张祥前称果克星距地球十几光年，天苑四是距太阳最近的单恒星之一。' },
+  { n: '果克星 (定位不明)', ra: 6.75, dec: -16.7, desc: '张祥前 | 1985年接触 · 推测星位③', detail: '推测候选：大犬座α(天狼星，8.6光年)。全天最亮恒星，距地球较近，若果克星在十光年内则天狼星方向可能性较大。' },
+  { n: '果克星 (定位不明)', ra: 18.62, dec: 38.8, desc: '张祥前 | 1985年接触 · 推测星位④', detail: '推测候选：天琴座α(织女星，25光年)。若将"十几光年"放宽到二十余光年，织女星方向亦有可能。果克星真实位置仍未知。' },
+];
+
+const tourWaypoints = [
+  { type: 'overview', pos: [0, 50, 70], stay: 20 },
+  { type: 'planet', planet: 'Mercury', stay: 5 },
+  { type: 'planet', planet: 'Venus', stay: 5 },
+  { type: 'planet', planet: 'Earth', stay: 6 },
+  { type: 'planet', planet: 'Mars', stay: 5 },
+  { type: 'planet', planet: 'Jupiter', stay: 6 },
+  { type: 'planet', planet: 'Saturn', stay: 6 },
+  { type: 'planet', planet: 'Uranus', stay: 5 },
+  { type: 'planet', planet: 'Neptune', stay: 5 },
+  { type: 'overview', pos: [0, -30, 75], stay: 10 },
+  ...constellationInfo.map((c, i) => ({ type: 'constellation', index: i, stay: 4 })),
+  { type: 'overview', pos: [0, 60, 10], stay: 6 },
+  ...contactMarkers.map((c, i) => ({ type: 'contact', index: i, stay: 7 })),
+];
+
+const contactGlowGroups = [];
+contactMarkers.forEach((cm, ci) => {
+  const pos = raDecToVec3(cm.ra, cm.dec, 558);
+  const gc = document.createElement('canvas'); gc.width = 64; gc.height = 64;
+  const gx = gc.getContext('2d');
+  const gr = gx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,200,80,0.95)'); gr.addColorStop(0.3, 'rgba(255,140,30,0.5)');
+  gr.addColorStop(0.7, 'rgba(255,60,0,0.08)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  gx.fillStyle = gr; gx.fillRect(0, 0, 64, 64);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(gc), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.65,
+  }));
+  sp.position.copy(pos); sp.scale.set(10, 10, 1);
+  sp.userData = { phase: Math.random() * Math.PI * 2, ci };
+  scene.add(sp);
+  contactGlowGroups[ci] = [sp];
+});
+
+let tourActive = false, tourIdx = 0, tourProgress = 0, tourPhase = 'moving', tourWait = 0;
+let tStartPos = new THREE.Vector3(), tStartTarget = new THREE.Vector3();
+let tourFlash = 0, tourFlashTimer = 0, tourHighlight = 0;
+
+function toggleTour() {
+  tourActive = !tourActive;
+  if (tourActive) {
+    controls.enabled = false; tourIdx = 0; tourPhase = 'moving'; tourProgress = 0;
+    camera.position.set(450, 150, 550);
+    controls.target.set(0, 0, 0); camera.lookAt(controls.target);
+    tStartPos.copy(camera.position); tStartTarget.set(0, 0, 0);
+    tourBtn.classList.add('active'); tourBtn.textContent = '⏸ 停止';
+    infoEl.style.opacity = '0'; copyrightEl.style.opacity = '1';
+    tourLabel.style.opacity = '0';
+    bgm.play().catch(() => {});
+  } else {
+    controls.enabled = true;
+    bgm.pause();
+    setSolarVisibility(true);
+    moonLabels.forEach(l => { l.visible = false; });
+    controls.target.copy(camera.position.clone().add(new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).multiplyScalar(30)));
+    controls.update();
+    tourBtn.classList.remove('active'); tourBtn.textContent = '自动遨游';
+    infoEl.style.opacity = '1'; copyrightEl.style.opacity = '0';
+    tourLabel.style.opacity = '0';
+  }
+}
+tourBtn.addEventListener('click', toggleTour);
+
+function easeIO(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+function updateTour(dt) {
+  if (!tourActive) return;
+  const wp = tourWaypoints[tourIdx];
+
+  if (tourPhase === 'moving') {
+    let tPos, tLook;
+    if (wp.type === 'planet') {
+      const pl = planets.find(p => p.name === wp.planet);
+      if (pl) {
+        tLook = new THREE.Vector3(); pl._planetGroup.getWorldPosition(tLook);
+        const toSun = tLook.clone().normalize().multiplyScalar(-1);
+        const R = pl.sizeVisual + 6;
+        const mult = pl._viewDist || 2.2;
+        tPos = tLook.clone().add(toSun.clone().multiplyScalar(R * mult));
+        const right = new THREE.Vector3().crossVectors(toSun, new THREE.Vector3(0, 1, 0)).normalize();
+        tPos.add(right.clone().multiplyScalar(R * 0.6));
+        tPos.y += R * 0.5;
+      } else { tPos = new THREE.Vector3(0, 30, 40); tLook = new THREE.Vector3(0, 0, 0); }
+    } else if (wp.type === 'constellation' || wp.type === 'contact') {
+      const info = wp.type === 'constellation' ? constellationInfo[wp.index] : contactMarkers[wp.index];
+      const lookDist = wp.type === 'contact' ? 500 : 350;
+      tLook = raDecToVec3(info.ra, info.dec, lookDist);
+      const dir = tLook.clone().normalize();
+      const side = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+      if (side.length() < 0.1) side.set(1, 0, 0);
+      tPos = dir.clone().multiplyScalar(-10).add(side.clone().multiplyScalar(60));
+      tPos.y += 8;
+    } else {
+      tPos = new THREE.Vector3(...wp.pos); tLook = new THREE.Vector3(0, 0, 0);
+    }
+
+    tourProgress += dt * 0.35;
+    if (tourProgress >= 1) {
+      tourProgress = 1; tourPhase = 'waiting'; tourWait = 0;
+      setSolarVisibility(wp.type !== 'constellation' && wp.type !== 'contact');
+      moonLabels.forEach(l => { l.visible = (wp.type === 'planet'); });
+      if (wp.type === 'constellation' || wp.type === 'contact') { tourFlash = 14; tourFlashTimer = 0; tourHighlight = 2.5; }
+      if (wp.type === 'planet') {
+        tourLabel.innerHTML = planetNames[wp.planet];
+        tourLabel.classList.add('planetSub');
+      } else if (wp.type === 'constellation' || wp.type === 'contact') {
+        const info = wp.type === 'constellation' ? constellationInfo[wp.index] : contactMarkers[wp.index];
+        tourLabel.innerHTML = `${info.n}<sub>${info.detail || info.desc}</sub>`;
+        tourLabel.classList.remove('planetSub');
+      } else {
+        tourLabel.innerHTML = '太阳系<sub>The Solar System</sub>';
+        tourLabel.classList.remove('planetSub');
+      }
+      tourLabel.style.opacity = '1';
+    } else if (tourProgress > 0.6) {
+      tourLabel.style.opacity = '0';
+    }
+    const t = easeIO(tourProgress);
+    camera.position.lerpVectors(tStartPos, tPos, t);
+    controls.target.lerpVectors(tStartTarget, tLook, t);
+    camera.lookAt(controls.target);
+  } else {
+    if (wp.type === 'planet') {
+      const pl = planets.find(p => p.name === wp.planet);
+      if (pl) {
+        const tLook = new THREE.Vector3(); pl._planetGroup.getWorldPosition(tLook);
+        controls.target.lerp(tLook, 0.2);
+        const R = pl.sizeVisual + 6;
+        const toSun = tLook.clone().normalize().multiplyScalar(-1);
+        const up = new THREE.Vector3(0, 1, 0);
+        const right = new THREE.Vector3().crossVectors(toSun, up).normalize();
+        if (right.length() < 0.1) right.set(1, 0, 0);
+        up.crossVectors(right, toSun).normalize();
+        const angle = tourWait * 0.8;
+        const orbitR = R * (pl._viewDist || 2.5);
+        const offset = toSun.clone().multiplyScalar(orbitR * 0.5)
+          .add(right.clone().multiplyScalar(Math.cos(angle) * orbitR))
+          .add(up.clone().multiplyScalar(Math.sin(angle) * orbitR * 0.6));
+        camera.position.copy(tLook.clone().add(offset));
+        camera.lookAt(controls.target);
+      }
+    } else if (wp.type === 'constellation' || wp.type === 'contact') {
+      const info = wp.type === 'constellation' ? constellationInfo[wp.index] : contactMarkers[wp.index];
+      const lookDist = wp.type === 'contact' ? 500 : 350;
+      const tLook = raDecToVec3(info.ra, info.dec, lookDist);
+      controls.target.lerp(tLook, 0.15);
+      const dir = tLook.clone().normalize();
+      const side = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0)).normalize();
+      if (side.length() < 0.1) side.set(1, 0, 0);
+      const wobble = Math.sin(tourWait * 0.5) * 8;
+      const camBase = dir.clone().multiplyScalar(-10).add(side.clone().multiplyScalar(60));
+      camera.position.copy(camBase.clone().add(side.clone().multiplyScalar(wobble)));
+      camera.position.y += 8 + Math.cos(tourWait * 0.5) * 5;
+      camera.lookAt(tLook);
+    } else {
+      const tLook = new THREE.Vector3(0, 0, 0);
+      controls.target.lerp(tLook, 0.1);
+      const up = new THREE.Vector3(0, 1, 0);
+      const angle = tourWait * 0.314;
+      const orbitR = 65;
+      const initPos = new THREE.Vector3(...wp.pos);
+      const right = new THREE.Vector3().crossVectors(initPos.clone().normalize(), up).normalize();
+      if (right.length() < 0.1) right.set(1, 0, 0);
+      const offset = initPos.clone().normalize().multiplyScalar(Math.cos(angle) * orbitR * 0.6)
+        .add(right.clone().multiplyScalar(Math.sin(angle) * orbitR));
+      offset.y += Math.sin(angle * 0.7) * orbitR * 0.4;
+      camera.position.copy(tLook.clone().add(offset));
+      camera.lookAt(tLook);
+    }
+
+    tourWait += dt;
+    if (tourWait >= wp.stay) {
+      tourIdx = (tourIdx + 1) % tourWaypoints.length;
+      tourPhase = 'moving'; tourProgress = 0;
+      tourLabel.style.opacity = '0';
+      tStartPos.copy(camera.position); tStartTarget.copy(controls.target);
+    }
+  }
+}
+
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const elapsed = performance.now() * 0.001;
+
+  const sf = scene.getObjectByName('starfield');
+  if (sf) {
+    const flicker = 0.85 + Math.sin(elapsed * 0.7) * 0.10 + Math.sin(elapsed * 1.3) * 0.05;
+    sf.material.opacity = flicker;
+  }
+
+  updateTour(dt);
+  if (!tourActive) controls.update();
+
+  sunMesh.rotation.y += dt * 0.08;
+
+  planets.forEach(p => {
+    const od = p._orbit;
+    const pname = p._planetMesh.name;
+    const data = {
+      'Mercury': { orbitPeriod: 0.2408, rotPeriod: 58.646, dir: 1 },
+      'Venus':   { orbitPeriod: 0.6152, rotPeriod: 2.0, dir: 1 },
+      'Earth':   { orbitPeriod: 1.0,    rotPeriod: 1.0,    dir: 1 },
+      'Mars':    { orbitPeriod: 1.8808, rotPeriod: 1.026,  dir: 1 },
+      'Jupiter': { orbitPeriod: 11.8626,rotPeriod: 0.414,  dir: 1 },
+      'Saturn':  { orbitPeriod: 29.4475,rotPeriod: 0.444,  dir: 1 },
+      'Uranus':  { orbitPeriod: 84.0168,rotPeriod: 0.718,  dir: -1 },
+      'Neptune': { orbitPeriod: 164.791,rotPeriod: 0.671,  dir: 1 }
+    }[pname] || { orbitPeriod: od.period || 1.0, rotPeriod: 1.0, dir: 1 };
+
+    const M = od.M0 + 2 * Math.PI * (elapsed / (data.orbitPeriod * 20));
+    p._planetGroup.position.copy(orbitalPos3D(od.a, od.e, od.inc, od.lop, M));
+
+    if (pname === 'Mercury') {
+      const pos = p._planetGroup.position;
+      p._planetMesh.rotation.y = -Math.atan2(pos.z, pos.x);
+    } else {
+      const BASE = 4.0;
+      p._planetMesh.rotation.y = data.dir * (2 * Math.PI * elapsed / (data.rotPeriod * BASE));
+    }
+
+    if (p._moonPivots) p._moonPivots.forEach(mp => {
+      mp.rotation.y += mp.userData.speed * dt * 0.45;
+      if (mp.userData.tidalLock) mp.children[0].rotation.y = -mp.rotation.y;
+    });
+  });
+
+  const focusedCi = (tourActive && tourWaypoints[tourIdx] && (tourWaypoints[tourIdx].type === 'constellation' || tourWaypoints[tourIdx].type === 'contact')) ? tourWaypoints[tourIdx].index : -1;
+  const isContact = tourWaypoints[tourIdx] && tourWaypoints[tourIdx].type === 'contact';
+
+  if (tourFlash > 0) {
+    tourFlashTimer += dt;
+    if (tourFlashTimer > 0.035) { tourFlashTimer = 0; tourFlash--; }
+  }
+  if (tourHighlight > 0 && tourFlash <= 0) tourHighlight -= dt;
+
+  constLineGroups.forEach((group, i) => {
+    group.forEach(m => {
+      if (tourActive && tourPhase === 'waiting' && i === focusedCi && !isContact) {
+        if (tourFlash > 0) {
+          m.opacity = (tourFlash % 2 === 0) ? 0.95 : 0.25;
+        } else if (tourHighlight > 0) {
+          m.opacity = 0.85;
+        } else {
+          m.opacity = 0.85;
+        }
+      } else {
+        m.opacity = 0.35 + Math.sin(elapsed * 0.7 + i * 0.4) * 0.2;
+      }
+    });
+  });
+
+  constStarGroups.forEach((group, i) => {
+    group.forEach(s => {
+      s.visible = true;
+      const tw = 0.55 + Math.sin(elapsed * s.userData.freq + s.userData.phase) * 0.45;
+      if (tourActive && tourPhase === 'waiting' && i === focusedCi && !isContact) {
+        if (tourFlash > 0) {
+          s.material.opacity = (tourFlash % 2 === 0) ? 1.0 : 0.4;
+        } else if (tourHighlight > 0) {
+          s.material.opacity = 0.9 + tw * 0.1;
+        } else {
+          s.scale.setScalar(0.42 + tw * 0.2);
+          s.material.opacity = 0.7 + tw * 0.2;
+        }
+      } else {
+        s.scale.setScalar(0.28 + tw * 0.35);
+        s.material.opacity = 0.5 + tw * 0.4;
+      }
+      s.material.blending = THREE.AdditiveBlending;
+      s.material.depthTest = true;
+      s.material.depthWrite = false;
+      s.renderOrder = 10;
+    });
+  });
+
+  contactGlowGroups.flat().forEach(s => {
+    const tw = 0.6 + Math.sin(elapsed * 2 + s.userData.phase) * 0.4;
+    const isFocusedContact = focusedCi >= 0 && tourActive && tourPhase === 'waiting' && s.userData.ci === focusedCi && isContact;
+    if (isFocusedContact) {
+      if (tourFlash > 0) {
+        s.material.opacity = (tourFlash % 2 === 0) ? 1.0 : 0.2;
+        s.scale.setScalar((tourFlash % 2 === 0) ? 30 : 12);
+      } else if (tourHighlight > 0) {
+        s.material.opacity = 0.95;
+        s.scale.setScalar(24);
+      } else {
+        s.material.opacity = 0.75 + tw * 0.2;
+        s.scale.setScalar(14 + tw * 4);
+      }
+    } else {
+      s.material.opacity = tw * 0.65;
+      s.scale.setScalar(8 + tw * 4);
+    }
+  });
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() === 't') toggleTour();
+  if (e.key.toLowerCase() === 'r') { if (tourActive) toggleTour(); controls.target.set(0, 0, 0); camera.position.set(0, 25, 45); controls.update(); }
+});
+</script>
+</body>
+</html>
