@@ -5,7 +5,7 @@
 ![Three.js](https://img.shields.io/badge/Three.js-Optimized-green.svg)
 
 本项目是一款基于原生 WebGL (Three.js) 深度开发的 3D 太阳系动态沙盘引擎。有别于传统的“匀速圆周”三维动画演示，本引擎采用了**“双轴时空解耦架构”**，将极客级别的渲染性能优化与严谨的开普勒天体力学相融合，在浏览器端构建了一个物理精确、视觉宏大的全景星际数字孪生体。
-
+<img src="preview.png" alt="程序运行截图1" width="500"/>
 ## ✨ 核心特性
 
 ### 🔭 纯正的天体力学内核
